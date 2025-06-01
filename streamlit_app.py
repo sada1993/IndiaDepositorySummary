@@ -13,6 +13,48 @@ st.set_page_config(page_title="NSDL/CDSL PDF Parser", page_icon="📊", layout="
 numeric_re = re.compile(r'[0-9][0-9,]*\.?[0-9]*')
 isin_re = re.compile(r'^IN[A-Z0-9]{10}$')
 
+def format_indian_number(num):
+    """Format number in Indian comma style"""
+    if num == 0:
+        return "0"
+    
+    # Handle negative numbers
+    negative = num < 0
+    num = abs(num)
+    
+    # Convert to string and handle decimal places
+    if num == int(num):
+        num_str = str(int(num))
+    else:
+        num_str = f"{num:.2f}"
+    
+    # Split into integer and decimal parts
+    if '.' in num_str:
+        integer_part, decimal_part = num_str.split('.')
+        decimal_part = '.' + decimal_part
+    else:
+        integer_part = num_str
+        decimal_part = ''
+    
+    # Apply Indian comma formatting (last 3 digits, then groups of 2)
+    if len(integer_part) > 3:
+        # Last 3 digits
+        last_three = integer_part[-3:]
+        remaining = integer_part[:-3]
+        
+        # Add commas every 2 digits from right to left for remaining digits
+        formatted_remaining = ''
+        for i, digit in enumerate(reversed(remaining)):
+            if i > 0 and i % 2 == 0:
+                formatted_remaining = ',' + formatted_remaining
+            formatted_remaining = digit + formatted_remaining
+        
+        formatted = formatted_remaining + ',' + last_three + decimal_part
+    else:
+        formatted = integer_part + decimal_part
+    
+    return f"-{formatted}" if negative else formatted
+
 def extract_company(tokens, start_idx):
     """
     Build company name from tokens[start_idx:] until
@@ -308,7 +350,7 @@ if uploaded_files:
                     'Status': '✅ Success' if result['success'] else '❌ Failed',
                     'Accounts': result['accounts'],
                     'Records': result['records'],
-                    'Total Value (₹)': f"{result['total_value']:,.2f}" if result['success'] else 'N/A',
+                    'Total Value (₹)': f"₹{format_indian_number(result['total_value'])}" if result['success'] else 'N/A',
                     'Error': result['error'] if not result['success'] else ''
                 })
             
@@ -325,7 +367,7 @@ if uploaded_files:
                 
                 with col2:
                     total_value = master_combined_df['Value'].sum() if 'Value' in master_combined_df.columns else 0
-                    st.metric("Total Portfolio Value", f"₹{total_value:,.2f}")
+                    st.metric("Total Portfolio Value", f"₹{format_indian_number(total_value)}")
                 
                 with col3:
                     st.metric("Total Accounts", len(consolidated_accounts))
@@ -340,8 +382,6 @@ if uploaded_files:
                         'Current_Balance': 'sum',
                         'Value': 'sum',
                         'ISIN': 'first',  # Keep one ISIN per company
-                        'Account_Name': lambda x: ', '.join(x.unique()),  # Show all accounts
-                        'Depository': lambda x: ', '.join(x.unique())  # Show all depositories
                     }).round(2)
                     
                     # Sort by total value (descending)
@@ -350,22 +390,41 @@ if uploaded_files:
                     # Reset index to make Company_Name a column
                     grouped_df = grouped_df.reset_index()
                     
-                    # Reorder columns for better display
-                    grouped_df = grouped_df[['Company_Name', 'ISIN', 'Current_Balance', 'Value', 'Account_Name', 'Depository']]
+                    # Format numbers in Indian style
+                    grouped_df['Current_Balance_Formatted'] = grouped_df['Current_Balance'].apply(lambda x: format_indian_number(x))
+                    grouped_df['Value_Formatted'] = grouped_df['Value'].apply(lambda x: f"₹{format_indian_number(x)}")
+                    
+                    # Reorder columns for better display (excluding Account_Name and Depository)
+                    display_df = grouped_df[['Company_Name', 'ISIN', 'Current_Balance_Formatted', 'Value_Formatted']].copy()
+                    display_df.columns = ['Company Name', 'ISIN', 'Current Balance', 'Value (₹)']
                     
                     st.markdown("**📈 Holdings Summary (Grouped by Company, Sorted by Total Value)**")
-                    st.dataframe(grouped_df, use_container_width=True)
+                    st.dataframe(display_df, use_container_width=True)
                     
                     # Show top 10 holdings
                     if len(grouped_df) > 0:
                         st.markdown("**🏆 Top 10 Holdings by Value**")
                         top_10 = grouped_df.head(10)[['Company_Name', 'Current_Balance', 'Value']].copy()
                         top_10['Percentage'] = (top_10['Value'] / total_value * 100).round(2)
-                        st.dataframe(top_10, use_container_width=True)
+                        top_10['Current_Balance_Formatted'] = top_10['Current_Balance'].apply(lambda x: format_indian_number(x))
+                        top_10['Value_Formatted'] = top_10['Value'].apply(lambda x: f"₹{format_indian_number(x)}")
+                        
+                        # Create display dataframe with formatted columns
+                        top_10_display = top_10[['Company_Name', 'Current_Balance_Formatted', 'Value_Formatted', 'Percentage']].copy()
+                        top_10_display.columns = ['Company Name', 'Current Balance', 'Value (₹)', 'Percentage (%)']
+                        st.dataframe(top_10_display, use_container_width=True)
                     
                     # Also show detailed view
                     with st.expander("📋 Detailed View (All Records)", expanded=False):
-                        st.dataframe(master_combined_df.head(50), use_container_width=True)
+                        # Format the detailed view dataframe
+                        detailed_df = master_combined_df.head(50).copy()
+                        if 'Current_Balance' in detailed_df.columns:
+                            detailed_df['Current_Balance'] = detailed_df['Current_Balance'].apply(lambda x: format_indian_number(x) if pd.notna(x) else 'N/A')
+                        if 'Value' in detailed_df.columns:
+                            detailed_df['Value'] = detailed_df['Value'].apply(lambda x: f"₹{format_indian_number(x)}" if pd.notna(x) else 'N/A')
+                        if 'Market_Price' in detailed_df.columns:
+                            detailed_df['Market_Price'] = detailed_df['Market_Price'].apply(lambda x: f"₹{x:,.2f}" if pd.notna(x) else 'N/A')
+                        st.dataframe(detailed_df, use_container_width=True)
                 
                 # Account-wise breakdown from consolidated data
                 if len(consolidated_accounts) > 1:
@@ -373,17 +432,33 @@ if uploaded_files:
                     for acct_name, df in consolidated_accounts.items():
                         if not df.empty:
                             account_value = df['Value'].sum() if 'Value' in df.columns else 0
-                            with st.expander(f"Account: {acct_name} ({len(df)} records, ₹{account_value:,.2f})"):
-                                st.dataframe(df, use_container_width=True)
+                            with st.expander(f"Account: {acct_name} ({len(df)} records, ₹{format_indian_number(account_value)})"):
+                                # Format the dataframe for display
+                                display_df = df.copy()
+                                if 'Current_Balance' in display_df.columns:
+                                    display_df['Current_Balance'] = display_df['Current_Balance'].apply(lambda x: format_indian_number(x) if pd.notna(x) else 'N/A')
+                                if 'Value' in display_df.columns:
+                                    display_df['Value'] = display_df['Value'].apply(lambda x: f"₹{format_indian_number(x)}" if pd.notna(x) else 'N/A')
+                                if 'Market_Price' in display_df.columns:
+                                    display_df['Market_Price'] = display_df['Market_Price'].apply(lambda x: f"₹{x:,.2f}" if pd.notna(x) else 'N/A')
+                                st.dataframe(display_df, use_container_width=True)
                 
                 # File-wise breakdown
                 st.subheader("📁 File-wise Data Breakdown")
                 for i, (result, account_dfs, combined_df) in enumerate(zip(parsing_results, all_account_dfs, all_combined_dfs)):
                     if result['success']:
                         file_value = combined_df['Value'].sum() if 'Value' in combined_df.columns and not combined_df.empty else 0
-                        with st.expander(f"File: {result['file_name']} ({result['records']} records, ₹{file_value:,.2f})"):
+                        with st.expander(f"File: {result['file_name']} ({result['records']} records, ₹{format_indian_number(file_value)})"):
                             if not combined_df.empty:
-                                st.dataframe(combined_df, use_container_width=True)
+                                # Format the dataframe for display
+                                display_df = combined_df.copy()
+                                if 'Current_Balance' in display_df.columns:
+                                    display_df['Current_Balance'] = display_df['Current_Balance'].apply(lambda x: format_indian_number(x) if pd.notna(x) else 'N/A')
+                                if 'Value' in display_df.columns:
+                                    display_df['Value'] = display_df['Value'].apply(lambda x: f"₹{format_indian_number(x)}" if pd.notna(x) else 'N/A')
+                                if 'Market_Price' in display_df.columns:
+                                    display_df['Market_Price'] = display_df['Market_Price'].apply(lambda x: f"₹{x:,.2f}" if pd.notna(x) else 'N/A')
+                                st.dataframe(display_df, use_container_width=True)
                             else:
                                 st.warning("No data extracted from this file.")
                 

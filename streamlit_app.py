@@ -372,8 +372,8 @@ if uploaded_files:
                 with col3:
                     st.metric("Total Accounts", len(consolidated_accounts))
                 
-                # Display consolidated data preview
-                st.subheader("🔍 Consolidated Data Preview")
+                # Display consolidated data table
+                st.subheader("📊 Portfolio Holdings")
                 
                 # Group by company name and show totals
                 if not master_combined_df.empty:
@@ -390,77 +390,18 @@ if uploaded_files:
                     # Reset index to make Company_Name a column
                     grouped_df = grouped_df.reset_index()
                     
+                    # Calculate percentage holdings
+                    grouped_df['Percentage'] = (grouped_df['Value'] / total_value * 100).round(2)
+                    
                     # Format numbers in Indian style
                     grouped_df['Current_Balance_Formatted'] = grouped_df['Current_Balance'].apply(lambda x: format_indian_number(x))
                     grouped_df['Value_Formatted'] = grouped_df['Value'].apply(lambda x: f"₹{format_indian_number(x)}")
                     
-                    # Reorder columns for better display (excluding Account_Name and Depository)
-                    display_df = grouped_df[['Company_Name', 'ISIN', 'Current_Balance_Formatted', 'Value_Formatted']].copy()
-                    display_df.columns = ['Company Name', 'ISIN', 'Current Balance', 'Value (₹)']
+                    # Reorder columns for better display
+                    display_df = grouped_df[['Company_Name', 'ISIN', 'Current_Balance_Formatted', 'Value_Formatted', 'Percentage']].copy()
+                    display_df.columns = ['Company Name', 'ISIN', 'Current Balance', 'Value (₹)', 'Percentage (%)']
                     
-                    st.markdown("**📈 Holdings Summary (Grouped by Company, Sorted by Total Value)**")
                     st.dataframe(display_df, use_container_width=True)
-                    
-                    # Show top 10 holdings
-                    if len(grouped_df) > 0:
-                        st.markdown("**🏆 Top 10 Holdings by Value**")
-                        top_10 = grouped_df.head(10)[['Company_Name', 'Current_Balance', 'Value']].copy()
-                        top_10['Percentage'] = (top_10['Value'] / total_value * 100).round(2)
-                        top_10['Current_Balance_Formatted'] = top_10['Current_Balance'].apply(lambda x: format_indian_number(x))
-                        top_10['Value_Formatted'] = top_10['Value'].apply(lambda x: f"₹{format_indian_number(x)}")
-                        
-                        # Create display dataframe with formatted columns
-                        top_10_display = top_10[['Company_Name', 'Current_Balance_Formatted', 'Value_Formatted', 'Percentage']].copy()
-                        top_10_display.columns = ['Company Name', 'Current Balance', 'Value (₹)', 'Percentage (%)']
-                        st.dataframe(top_10_display, use_container_width=True)
-                    
-                    # Also show detailed view
-                    with st.expander("📋 Detailed View (All Records)", expanded=False):
-                        # Format the detailed view dataframe
-                        detailed_df = master_combined_df.head(50).copy()
-                        if 'Current_Balance' in detailed_df.columns:
-                            detailed_df['Current_Balance'] = detailed_df['Current_Balance'].apply(lambda x: format_indian_number(x) if pd.notna(x) else 'N/A')
-                        if 'Value' in detailed_df.columns:
-                            detailed_df['Value'] = detailed_df['Value'].apply(lambda x: f"₹{format_indian_number(x)}" if pd.notna(x) else 'N/A')
-                        if 'Market_Price' in detailed_df.columns:
-                            detailed_df['Market_Price'] = detailed_df['Market_Price'].apply(lambda x: f"₹{x:,.2f}" if pd.notna(x) else 'N/A')
-                        st.dataframe(detailed_df, use_container_width=True)
-                
-                # Account-wise breakdown from consolidated data
-                if len(consolidated_accounts) > 1:
-                    st.subheader("📊 Account-wise Breakdown (Consolidated)")
-                    for acct_name, df in consolidated_accounts.items():
-                        if not df.empty:
-                            account_value = df['Value'].sum() if 'Value' in df.columns else 0
-                            with st.expander(f"Account: {acct_name} ({len(df)} records, ₹{format_indian_number(account_value)})"):
-                                # Format the dataframe for display
-                                display_df = df.copy()
-                                if 'Current_Balance' in display_df.columns:
-                                    display_df['Current_Balance'] = display_df['Current_Balance'].apply(lambda x: format_indian_number(x) if pd.notna(x) else 'N/A')
-                                if 'Value' in display_df.columns:
-                                    display_df['Value'] = display_df['Value'].apply(lambda x: f"₹{format_indian_number(x)}" if pd.notna(x) else 'N/A')
-                                if 'Market_Price' in display_df.columns:
-                                    display_df['Market_Price'] = display_df['Market_Price'].apply(lambda x: f"₹{x:,.2f}" if pd.notna(x) else 'N/A')
-                                st.dataframe(display_df, use_container_width=True)
-                
-                # File-wise breakdown
-                st.subheader("📁 File-wise Data Breakdown")
-                for i, (result, account_dfs, combined_df) in enumerate(zip(parsing_results, all_account_dfs, all_combined_dfs)):
-                    if result['success']:
-                        file_value = combined_df['Value'].sum() if 'Value' in combined_df.columns and not combined_df.empty else 0
-                        with st.expander(f"File: {result['file_name']} ({result['records']} records, ₹{format_indian_number(file_value)})"):
-                            if not combined_df.empty:
-                                # Format the dataframe for display
-                                display_df = combined_df.copy()
-                                if 'Current_Balance' in display_df.columns:
-                                    display_df['Current_Balance'] = display_df['Current_Balance'].apply(lambda x: format_indian_number(x) if pd.notna(x) else 'N/A')
-                                if 'Value' in display_df.columns:
-                                    display_df['Value'] = display_df['Value'].apply(lambda x: f"₹{format_indian_number(x)}" if pd.notna(x) else 'N/A')
-                                if 'Market_Price' in display_df.columns:
-                                    display_df['Market_Price'] = display_df['Market_Price'].apply(lambda x: f"₹{x:,.2f}" if pd.notna(x) else 'N/A')
-                                st.dataframe(display_df, use_container_width=True)
-                            else:
-                                st.warning("No data extracted from this file.")
                 
                 # Create Excel files for download
                 st.subheader("💾 Download Options")

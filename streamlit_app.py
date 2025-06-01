@@ -9,161 +9,170 @@ from io import BytesIO
 
 st.set_page_config(page_title="NSDL/CDSL PDF Parser", page_icon="📊", layout="wide")
 
-def first_decimal_token(num_tokens):
-    """Helper function to find first token with decimal point"""
-    for tok in num_tokens:
-        if '.' in tok:
-            return tok
-    return num_tokens[0] if num_tokens else None
+# regex helpers
+numeric_re = re.compile(r'[0-9][0-9,]*\.?[0-9]*')
+isin_re = re.compile(r'^IN[A-Z0-9]{10}$')
 
-def tokenize_numbers(line):
-    """Extract numeric tokens from a line"""
-    numeric_re = re.compile(r'[0-9][0-9,]*\.?[0-9]*')
-    return re.findall(numeric_re, line)
+def extract_company(tokens, start_idx):
+    """
+    Build company name from tokens[start_idx:] until
+    we hit the first token containing any digit.
+    """
+    comp = []
+    for tok in tokens[start_idx:]:
+        if re.search(r'\d', tok):
+            break
+        comp.append(tok)
+    # drop trailing "#" if present
+    if comp and comp[-1] == "#":
+        comp = comp[:-1]
+    return " ".join(comp).strip()
 
-def parse_line_for_numbers(line, dep):
-    """Parse a line to extract current_balance, market_price, and value"""
-    nums = tokenize_numbers(line)
-    if not nums:
-        return None
-    
-    # convert to float
-    nums_f = [float(n.replace(',','')) for n in nums]
-    
-    # for all accounts we need Market_Price and Value from end:
-    if len(nums_f) >= 2:
-        market_price = nums_f[-2]
-        value = nums_f[-1]
-    else:
-        return None
-    
-    current_balance = None
-    if dep == 'CDSL':
-        # choose first decimal token containing '.'
-        token = first_decimal_token(nums)
-        current_balance = float(token.replace(',','')) if token is not None else None
-    else:
-        # NSDL: quantity is second last maybe [-3]
-        if len(nums_f) >= 3:
-            current_balance = nums_f[-3]
-    
-    return current_balance, market_price, value
+def parse_numeric(tokens):
+    """Return (nums_f, market_price, value) or (None, None, None)."""
+    nums = [t for t in tokens if numeric_re.fullmatch(t.replace(",", ""))]
+    nums_f = [float(t.replace(",", "")) for t in nums]
+    if len(nums_f) < 2:
+        return None, None, None
+    return nums_f, nums_f[-2], nums_f[-1]
+
+def parse_accounts(lines):
+    """
+    Slice raw PDF lines into account-level blocks.
+    Returns a dict keyed by account name.
+    """
+    accounts, i, n = [], 0, len(lines)
+
+    while i < n:
+        # --- Case A: clean two-line header ---
+        if lines[i].strip() == "ACCOUNT HOLDER":
+            depository = (
+                "NSDL"
+                if any("NSDL Demat Account" in lines[i - j] for j in range(1, 10) if i - j >= 0)
+                else "CDSL"
+            )
+            account_name = lines[i + 1].strip()
+            i += 2
+        # --- Case B: single-line header (e.g., corporate-bond account) ---
+        elif "ACCOUNT HOLDER" in lines[i]:
+            account_name = lines[i].split("ACCOUNT HOLDER")[0].strip()
+            depository = (
+                "NSDL"
+                if any("NSDL Demat Account" in lines[i - j] for j in range(1, 10) if i - j >= 0)
+                else "CDSL"
+            )
+            i += 1
+        else:
+            i += 1
+            continue
+
+        # capture all lines until next header
+        seg = []
+        while i < n and "ACCOUNT HOLDER" not in lines[i]:
+            seg.append(lines[i])
+            i += 1
+        accounts.append(
+            {"depository": depository, "account_name": account_name, "segment": seg}
+        )
+
+    # keep last occurrence of each account
+    return {a["account_name"]: a for a in accounts}
+
+def build_equity_dataframes(accounts):
+    """
+    For each account, keep only Equities and return per-account DataFrames.
+    """
+    dfs = {}
+
+    for acc_name, data in accounts.items():
+        dep = data["depository"]
+        rows = []
+        curr_ast = None
+        prev = None
+
+        for line in data["segment"]:
+            # asset headers
+            if "Equities" in line:
+                curr_ast = "Equities"
+                continue
+            if "Corporate Bonds" in line or "Mutual Fund" in line:
+                curr_ast = None          # ignore non-equity sections
+                continue
+            if curr_ast != "Equities":
+                prev = line
+                continue
+
+            tokens = line.split()
+            isin_idx = next((i for i, t in enumerate(tokens) if isin_re.fullmatch(t)), None)
+            if isin_idx is None:        # not an equity detail row
+                prev = line
+                continue
+
+            nums_f, mp, val = parse_numeric(tokens)
+            if nums_f is None:          # no numeric data
+                prev = line
+                continue
+
+            # Current Balance
+            if dep == "CDSL":
+                curr_tok = next(
+                    (t for t in tokens[isin_idx + 1 :] if numeric_re.fullmatch(t.replace(",", ""))),
+                    None,
+                )
+                curr_bal = float(curr_tok.replace(",", "")) if curr_tok else None
+            else:  # NSDL
+                curr_bal = nums_f[-3] if len(nums_f) >= 3 else None
+
+            company = extract_company(tokens, isin_idx + 1)
+
+            rows.append({
+                "ISIN": tokens[isin_idx],
+                "Company_Name": company,
+                "Account_Type": "Equities",
+                "Account_Name": acc_name,
+                "Depository": dep,
+                "Current_Balance": curr_bal,
+                "Market_Price": mp,
+                "Value": val,
+            })
+            prev = line
+
+        # Build DataFrame
+        df = pd.DataFrame(rows, columns=[
+            "ISIN",
+            "Company_Name", 
+            "Account_Type",
+            "Account_Name",
+            "Depository",
+            "Current_Balance",
+            "Market_Price",
+            "Value",
+        ])
+
+        # If any company name still ends up blank, mark it as UNKNOWN
+        if not df.empty:
+            df.loc[df["Company_Name"].str.strip() == "", "Company_Name"] = "UNKNOWN"
+        dfs[acc_name] = df
+
+    return dfs
 
 def parse_pdf(pdf_file):
-    """Main function to parse the uploaded PDF file"""
-    lines = []
-    
-    # Extract text from PDF
+    """Main function to parse the uploaded PDF file focusing on Equities only"""
+    # 1) read the whole PDF into lines
     with pdfplumber.open(pdf_file) as pdf:
-        for pg in pdf.pages:
-            txt = pg.extract_text(x_tolerance=2, y_tolerance=2)
-            lines.extend(txt.splitlines())
+        all_lines = []
+        for page in pdf.pages:
+            txt = page.extract_text(x_tolerance=2, y_tolerance=2)
+            all_lines.extend(txt.splitlines())
+
+    # 2) slice into accounts and parse for equities only
+    accounts = parse_accounts(all_lines)
+    account_dfs = build_equity_dataframes(accounts)
     
-    # Build accounts
-    accounts = []
-    for idx, line in enumerate(lines):
-        if line.strip() == 'ACCOUNT HOLDER':
-            dep = 'NSDL' if any('NSDL Demat Account' in lines[idx-j] for j in range(1,10) if idx-j>=0) else 'CDSL'
-            acct_name = lines[idx+1].strip()
-            seg = []
-            k = idx + 2
-            while k < len(lines) and 'ACCOUNT HOLDER' not in lines[k]:
-                seg.append(lines[k])
-                k += 1
-            accounts.append({'depository': dep, 'account_name': acct_name, 'segment': seg})
-        elif 'ACCOUNT HOLDER' in line and line.strip() != 'ACCOUNT HOLDER':
-            acct_name = line.split('ACCOUNT HOLDER')[0].strip()
-            dep = 'NSDL' if any('NSDL Demat Account' in lines[idx-j] for j in range(1,10) if idx-j>=0) else 'CDSL'
-            seg = []
-            k = idx + 1
-            while k < len(lines) and 'ACCOUNT HOLDER' not in lines[k]:
-                seg.append(lines[k])
-                k += 1
-            accounts.append({'depository': dep, 'account_name': acct_name, 'segment': seg})
-    
-    # Remove duplicates
-    unique = {}
-    for a in accounts:
-        unique[a['account_name']] = a
-    
-    # Build dataframes for each account
-    account_dfs = {}
+    # 3) create combined dataframe
     all_rows = []
-    
-    for acct_name, acct in unique.items():
-        dep = acct['depository']
-        current_asset = None
-        rows = []
-        prev_line = None
-        
-        for line in acct['segment']:
-            # detect assets
-            if 'Equities' in line:
-                current_asset = 'Equities'
-                continue
-            if 'Corporate Bonds' in line:
-                current_asset = 'Corporate Bonds'
-                continue
-            if 'Mutual Fund' in line:
-                current_asset = 'Mutual Funds'
-                continue
-            
-            # mutual fund multi-line
-            if re.fullmatch(r'IN[A-Z0-9]{10}', line.strip()):
-                # previous line includes numbers etc
-                combined = prev_line + ' ' + line.strip()
-                result = parse_line_for_numbers(combined, dep)
-                if result is None:
-                    prev_line = line
-                    continue
-                current_balance, market_price, value = result
-                isin = line.strip()
-                company = ' '.join(prev_line.split()[1:-len(tokenize_numbers(prev_line))]) if prev_line else ''
-                rows.append({
-                    'ISIN': isin,
-                    'Company_Name': company,
-                    'Account_Type': current_asset,
-                    'Account_Name': acct_name,
-                    'Depository': dep,
-                    'Current_Balance': current_balance,
-                    'Market_Price': market_price,
-                    'Value': value
-                })
-                prev_line = line
-                continue
-            
-            # single line case
-            if re.search(r'\bIN[A-Z0-9]{10}\b', line):
-                result = parse_line_for_numbers(line, dep)
-                if result is None:
-                    prev_line = line
-                    continue
-                current_balance, market_price, value = result
-                tokens = line.split()
-                isin = None
-                company = ''
-                for i, tok in enumerate(tokens):
-                    if re.match(r'IN[A-Z0-9]{10}', tok):
-                        isin = tok
-                        company = ' '.join(tokens[1:i]) if i > 1 else ''
-                        break
-                
-                rows.append({
-                    'ISIN': isin,
-                    'Company_Name': company,
-                    'Account_Type': current_asset,
-                    'Account_Name': acct_name,
-                    'Depository': dep,
-                    'Current_Balance': current_balance,
-                    'Market_Price': market_price,
-                    'Value': value
-                })
-            prev_line = line
-        
-        account_dfs[acct_name] = pd.DataFrame(rows)
-        all_rows.extend(rows)
-    
-    # Create combined dataframe
+    for df in account_dfs.values():
+        all_rows.extend(df.to_dict('records'))
     combined_df = pd.DataFrame(all_rows)
     
     return account_dfs, combined_df
@@ -214,8 +223,8 @@ def create_excel_file(account_dfs, combined_df, file_source=None):
     return output
 
 # Streamlit UI
-st.title("📊 NSDL/CDSL PDF Parser")
-st.markdown("Upload your NSDL or CDSL PDF files to parse and extract data into Excel format.")
+st.title("📊 NSDL/CDSL PDF Parser - Equities Only")
+st.markdown("Upload your NSDL or CDSL PDF files to parse and extract **Equities data only** into Excel format.")
 
 # File upload - now supports multiple files
 uploaded_files = st.file_uploader(
@@ -357,9 +366,9 @@ if uploaded_files:
                     # Consolidated Excel file
                     consolidated_excel = create_excel_file(consolidated_accounts, master_combined_df, "Consolidated")
                     st.download_button(
-                        label="📥 Download Consolidated Excel",
+                        label="📥 Download Consolidated Excel (Equities Only)",
                         data=consolidated_excel,
-                        file_name="consolidated_depository_data.xlsx",
+                        file_name="consolidated_equities_data.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         type="primary"
                     )
@@ -380,9 +389,9 @@ if uploaded_files:
                         
                         zip_buffer.seek(0)
                         st.download_button(
-                            label="📦 Download Individual Files (ZIP)",
+                            label="📦 Download Individual Files (ZIP) - Equities Only",
                             data=zip_buffer,
-                            file_name="individual_depository_files.zip",
+                            file_name="individual_equities_files.zip",
                             mime="application/zip"
                         )
             else:
@@ -397,8 +406,9 @@ else:
     st.markdown("""
     ### Features:
     - 📁 **Multiple File Upload**: Upload and process multiple NSDL/CDSL PDF files at once
-    - 🔄 **Automatic Consolidation**: Automatically combines data from all uploaded files
-    - 📊 **Comprehensive Dashboard**: View individual file results and consolidated summary
+    - 🔄 **Automatic Consolidation**: Automatically combines data from all uploaded files  
+    - 📊 **Equities Focus**: Extracts only equity holdings, ignoring bonds and mutual funds
+    - 📈 **Comprehensive Dashboard**: View individual file results and consolidated summary
     - 📥 **Flexible Downloads**: Download consolidated data or individual file results
     - 💼 **Account Merging**: Automatically merges data for the same account across multiple files
     """)
@@ -408,7 +418,7 @@ st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center; color: #666;'>
-        <p>NSDL/CDSL PDF Parser - Extract and consolidate depository data from multiple files to Excel format</p>
+        <p>NSDL/CDSL PDF Parser - Extract and consolidate <strong>Equities data</strong> from multiple files to Excel format</p>
     </div>
     """,
     unsafe_allow_html=True

@@ -111,11 +111,12 @@ def get_dividend_info_with_cache(company_name, isin, dividend_cache=None):
                 
                 # Check dividend cache first
                 dividend_df = None
+                from_cache = False
                 if cache_key in dividend_cache:
                     try:
                         dividend_df = pd.DataFrame(dividend_cache[cache_key])
                         if not dividend_df.empty:
-                            st.info(f"📋 Using cached dividend data for {company_name}")
+                            from_cache = True
                     except Exception as cache_error:
                         print(f"Error loading dividend cache for {company_name}: {str(cache_error)}")
                 
@@ -184,19 +185,19 @@ def get_dividend_info_with_cache(company_name, isin, dividend_cache=None):
                         return {
                             'Latest_Dividend': dividend_amount,
                             'Dividend_Date': dividend_date
-                        }, dividend_cache
+                        }, dividend_cache, from_cache
         
         return {
             'Latest_Dividend': 'N/A',
             'Dividend_Date': 'N/A'
-        }, dividend_cache
+        }, dividend_cache, False
         
     except Exception as e:
         print(f"Error getting dividend info for {company_name}: {str(e)}")
         return {
             'Latest_Dividend': 'Error',
             'Dividend_Date': 'Error'
-        }, dividend_cache
+        }, dividend_cache, False
 
 
 
@@ -613,6 +614,7 @@ if st.session_state.processed_data is not None:
                 
                 # Progress bar for dividend fetching
                 progress_bar = st.progress(0)
+                status_placeholder = st.empty()
                 dividend_data = []
                 
                 # Track updated cache data
@@ -623,15 +625,23 @@ if st.session_state.processed_data is not None:
                     progress_bar.progress((idx + 1) / len(grouped_df))
                     
                     # Get dividend info with caching
-                    div_info, updated_dividend_cache = get_dividend_info_with_cache(
+                    div_info, updated_dividend_cache, from_cache = get_dividend_info_with_cache(
                         row['Company_Name'], 
                         row['ISIN'], 
                         updated_dividend_cache
                     )
+                    
+                    # Update status message
+                    if from_cache:
+                        status_placeholder.info(f"📋 Loading from cache: {row['Company_Name']}")
+                    else:
+                        status_placeholder.info(f"🔄 Fetching data: {row['Company_Name']}")
+                    
                     dividend_data.append(div_info)
                 
-                # Clear progress bar
+                # Clear progress bar and status
                 progress_bar.empty()
+                status_placeholder.empty()
                 
                 # Add dividend columns to the dataframe
                 dividend_df = pd.DataFrame(dividend_data)

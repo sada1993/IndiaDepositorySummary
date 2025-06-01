@@ -13,6 +13,7 @@ streamlit = "^1.45.1"
 pandas = "^2.2.3"
 openpyxl = "^3.1.5"
 xlsxwriter = "^3.2.3"
+bharat-sm-data = "^3.0.0"
 
 
 [build-system]

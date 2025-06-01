@@ -5,7 +5,11 @@ import re
 import tempfile
 import os
 import zipfile
+import json
 from io import BytesIO
+from datetime import datetime
+from Fundamentals.TickerTape import Tickertape
+
 
 st.set_page_config(page_title="NSDL/CDSL PDF Parser", page_icon="📊", layout="wide")
 
@@ -54,6 +58,147 @@ def format_indian_number(num):
         formatted = integer_part + decimal_part
     
     return f"-{formatted}" if negative else formatted
+
+def load_cache_data(dividend_cache_file=None, price_cache_file=None):
+    """Load cached dividend data from uploaded files"""
+    dividend_cache = {}
+    
+    if dividend_cache_file is not None:
+        try:
+            dividend_cache_content = dividend_cache_file.getvalue().decode('utf-8')
+            dividend_cache = json.loads(dividend_cache_content)
+            st.success(f"✅ Loaded dividend cache with {len(dividend_cache)} entries")
+        except Exception as e:
+            st.error(f"❌ Error loading dividend cache: {str(e)}")
+    
+    return dividend_cache
+
+def save_cache_data(dividend_cache):
+    """Create downloadable cache files"""
+    cache_files = {}
+    
+    # Create dividend cache file
+    if dividend_cache:
+        dividend_json = json.dumps(dividend_cache, indent=2, default=str)
+        cache_files['dividend_cache'] = BytesIO(dividend_json.encode('utf-8'))
+    
+    return cache_files
+
+
+
+@st.cache_data
+def get_dividend_info_with_cache(company_name, isin, dividend_cache=None):
+    """Get dividend information with caching support"""
+    
+    # Initialize cache if None
+    if dividend_cache is None:
+        dividend_cache = {}
+    
+    cache_key = f"{company_name}_{isin}"
+    
+    try:
+        tt = Tickertape()
+        
+        # Try to get ticker information using company name
+        ticker_result = tt.get_ticker(company_name, search_place='stock')
+        
+        if ticker_result and len(ticker_result) >= 2 and ticker_result[1]:
+            # Get the first result from the search
+            stock_data = ticker_result[1][0] if isinstance(ticker_result[1], list) and len(ticker_result[1]) > 0 else None
+            
+            if stock_data and 'slug' in stock_data:
+                stock_slug = stock_data['slug']
+                
+                # Check dividend cache first
+                dividend_df = None
+                if cache_key in dividend_cache:
+                    try:
+                        dividend_df = pd.DataFrame(dividend_cache[cache_key])
+                        if not dividend_df.empty:
+                            st.info(f"📋 Using cached dividend data for {company_name}")
+                    except Exception as cache_error:
+                        print(f"Error loading dividend cache for {company_name}: {str(cache_error)}")
+                
+                # If not in cache, fetch from API
+                if dividend_df is None or dividend_df.empty:
+                    try:
+                        dividend_df = tt.get_dividends_history(stock_slug)
+                        if not dividend_df.empty:
+                            # Store in cache (convert to dict for JSON serialization)
+                            dividend_cache[cache_key] = dividend_df.to_dict('records')
+                    except Exception as api_error:
+                        print(f"Error fetching dividend data for {company_name}: {str(api_error)}")
+                        dividend_df = pd.DataFrame()
+                
+                if not dividend_df.empty:
+                    # Get the latest dividend information
+                    try:
+                        latest_dividend = dividend_df.iloc[0] if len(dividend_df) > 0 else None
+                    except (IndexError, AttributeError):
+                        latest_dividend = None
+                    
+                    if latest_dividend is not None:
+                        # Extract dividend data
+                        dividend_amount = 0
+                        dividend_date = 'N/A'
+                        
+                        try:
+                            # Safely extract dividend data
+                            if hasattr(latest_dividend, 'get'):
+                                dividend_amount = latest_dividend.get('dividend', 0)
+                                dividend_date = latest_dividend.get('exDate', 'N/A')
+                            elif isinstance(latest_dividend, dict):
+                                dividend_amount = latest_dividend.get('dividend', 0)
+                                dividend_date = latest_dividend.get('exDate', 'N/A')
+                            elif hasattr(latest_dividend, 'dividend'):
+                                dividend_amount = latest_dividend.dividend
+                                dividend_date = getattr(latest_dividend, 'exDate', 'N/A')
+                        except Exception as extract_error:
+                            print(f"Error extracting dividend data for {company_name}: {str(extract_error)}")
+                        
+                        # Ensure dividend_amount is a proper number
+                        try:
+                            dividend_amount = float(dividend_amount) if dividend_amount not in ['N/A', 'Error', None] else 0
+                        except (ValueError, TypeError):
+                            dividend_amount = 0
+                        
+                        # Format dividend date
+                        if dividend_date != 'N/A':
+                            try:
+                                from datetime import datetime
+                                # Assuming the date comes in ISO format or similar
+                                if isinstance(dividend_date, str):
+                                    # Try to parse various date formats
+                                    for fmt in ['%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y-%m-%dT%H:%M:%S.%fZ']:
+                                        try:
+                                            date_obj = datetime.strptime(dividend_date, fmt)
+                                            dividend_date = date_obj.strftime('%d %B %Y')
+                                            break
+                                        except ValueError:
+                                            continue
+                                elif hasattr(dividend_date, 'strftime'):
+                                    dividend_date = dividend_date.strftime('%d %B %Y')
+                            except:
+                                pass  # Keep original format if parsing fails
+                        
+                        return {
+                            'Latest_Dividend': dividend_amount,
+                            'Dividend_Date': dividend_date
+                        }, dividend_cache
+        
+        return {
+            'Latest_Dividend': 'N/A',
+            'Dividend_Date': 'N/A'
+        }, dividend_cache
+        
+    except Exception as e:
+        print(f"Error getting dividend info for {company_name}: {str(e)}")
+        return {
+            'Latest_Dividend': 'Error',
+            'Dividend_Date': 'Error'
+        }, dividend_cache
+
+
 
 def extract_company(tokens, start_idx):
     """
@@ -242,7 +387,7 @@ def consolidate_multiple_pdfs(all_account_dfs, all_combined_dfs):
     
     return consolidated_accounts, master_combined_df
 
-def create_excel_file(account_dfs, combined_df, file_source=None):
+def create_excel_file(account_dfs, combined_df, file_source=None, grouped_df_with_dividends=None):
     """Create an Excel file with multiple sheets"""
     output = BytesIO()
     
@@ -251,6 +396,19 @@ def create_excel_file(account_dfs, combined_df, file_source=None):
         if not combined_df.empty:
             sheet_name = 'All_Accounts' if file_source is None else f'All_Accounts_{file_source}'
             combined_df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+        
+        # Write portfolio summary with dividends if available
+        if grouped_df_with_dividends is not None and not grouped_df_with_dividends.empty:
+            # Create a clean version for Excel with unformatted numbers
+            excel_summary_df = grouped_df_with_dividends[[
+                'Company_Name', 'ISIN', 'Current_Balance', 'Value', 
+                'Percentage', 'Latest_Dividend', 'Dividend_Date'
+            ]].copy()
+            excel_summary_df.columns = [
+                'Company Name', 'ISIN', 'Current Balance', 'Value (₹)', 
+                'Percentage (%)', 'Latest Dividend (₹)', 'Dividend Date'
+            ]
+            excel_summary_df.to_excel(writer, sheet_name='Portfolio_Summary', index=False)
         
         # Write individual account data to separate sheets
         for acct_name, df in account_dfs.items():
@@ -267,6 +425,21 @@ def create_excel_file(account_dfs, combined_df, file_source=None):
 # Streamlit UI
 st.title("📊 NSDL/CDSL PDF Parser - Equities Only")
 st.markdown("Upload your NSDL or CDSL PDF files to parse and extract **Equities data only** into Excel format.")
+
+# Cache file upload section
+st.subheader("🗂️ Optional: Upload Cache Files")
+st.markdown("Upload previously downloaded cache files to speed up processing and avoid re-fetching data.")
+
+dividend_cache_file = st.file_uploader(
+    "Dividend Cache File",
+    type="json",
+    help="Upload the dividend_cache.json file from a previous run to avoid re-fetching dividend data."
+)
+
+# Load cache data if files are uploaded
+dividend_cache = load_cache_data(dividend_cache_file)
+
+st.markdown("---")
 
 # File upload - now supports multiple files
 uploaded_files = st.file_uploader(
@@ -393,33 +566,105 @@ if uploaded_files:
                     # Calculate percentage holdings
                     grouped_df['Percentage'] = (grouped_df['Value'] / total_value * 100).round(2)
                     
+                    # Add dividend information
+                    st.info("🔄 Fetching dividend information... This may take a few moments.")
+                    st.info("ℹ️ API calls are rate-limited to avoid overwhelming servers. Please be patient.")
+                    
+                    # Progress bar for dividend fetching
+                    progress_bar = st.progress(0)
+                    dividend_data = []
+                    
+                    # Track updated cache data
+                    updated_dividend_cache = dividend_cache.copy()
+                    
+                    for idx, row in grouped_df.iterrows():
+                        # Update progress
+                        progress_bar.progress((idx + 1) / len(grouped_df))
+                        
+                        # Get dividend info with caching
+                        div_info, updated_dividend_cache = get_dividend_info_with_cache(
+                            row['Company_Name'], 
+                            row['ISIN'], 
+                            updated_dividend_cache
+                        )
+                        dividend_data.append(div_info)
+                    
+                    # Clear progress bar
+                    progress_bar.empty()
+                    
+                    # Add dividend columns to the dataframe
+                    dividend_df = pd.DataFrame(dividend_data)
+                    grouped_df = pd.concat([grouped_df, dividend_df], axis=1)
+                    
                     # Format numbers in Indian style
                     grouped_df['Current_Balance_Formatted'] = grouped_df['Current_Balance'].apply(lambda x: format_indian_number(x))
                     grouped_df['Value_Formatted'] = grouped_df['Value'].apply(lambda x: f"₹{format_indian_number(x)}")
                     
+                    # Format dividend columns
+                    def format_dividend(x):
+                        if x == 'N/A' or x == 'Error':
+                            return str(x)
+                        try:
+                            # Try to convert to float and format with rupee sign
+                            dividend_val = float(x)
+                            return f"₹{dividend_val:.2f}"
+                        except (ValueError, TypeError):
+                            # If conversion fails, return as string
+                            return str(x)
+                    
+                    grouped_df['Latest_Dividend_Formatted'] = grouped_df['Latest_Dividend'].apply(format_dividend)
+                    
                     # Reorder columns for better display
-                    display_df = grouped_df[['Company_Name', 'ISIN', 'Current_Balance_Formatted', 'Value_Formatted', 'Percentage']].copy()
-                    display_df.columns = ['Company Name', 'ISIN', 'Current Balance', 'Value (₹)', 'Percentage (%)']
+                    display_df = grouped_df[[
+                        'Company_Name', 'ISIN', 'Current_Balance_Formatted', 'Value_Formatted', 
+                        'Percentage', 'Latest_Dividend_Formatted', 'Dividend_Date'
+                    ]].copy()
+                    display_df.columns = [
+                        'Company Name', 'ISIN', 'Current Balance', 'Value (₹)', 
+                        'Percentage (%)', 'Latest Dividend (₹)', 'Dividend Date'
+                    ]
                     
                     st.dataframe(display_df, use_container_width=True)
                 
                 # Create Excel files for download
                 st.subheader("💾 Download Options")
                 
-                col1, col2 = st.columns(2)
+                # Create cache files for download
+                cache_files = save_cache_data(updated_dividend_cache)
+                
+                col1, col2, col3 = st.columns(3)
                 
                 with col1:
                     # Consolidated Excel file
-                    consolidated_excel = create_excel_file(consolidated_accounts, master_combined_df, "Consolidated")
+                    consolidated_excel = create_excel_file(
+                        consolidated_accounts, 
+                        master_combined_df, 
+                        "Consolidated", 
+                        grouped_df if 'grouped_df' in locals() else None
+                    )
                     st.download_button(
-                        label="📥 Download Consolidated Excel (Equities Only)",
+                        label="📥 Download Consolidated Excel (with Dividend Yields)",
                         data=consolidated_excel,
-                        file_name="consolidated_equities_data.xlsx",
+                        file_name="consolidated_equities_with_dividend_yields.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         type="primary"
                     )
                 
                 with col2:
+                    # Cache files download
+                    if cache_files:
+                        st.markdown("**📋 Cache Files (for faster future runs):**")
+                        
+                        if 'dividend_cache' in cache_files:
+                            st.download_button(
+                                label="📊 Download Dividend Cache",
+                                data=cache_files['dividend_cache'],
+                                file_name=f"dividend_cache_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                                mime="application/json",
+                                help="Download this file to speed up future dividend data fetching"
+                            )
+                
+                with col3:
                     # Individual files Excel (if multiple files)
                     if len(successful_account_dfs) > 1:
                         # Create a zip file with individual Excel files
@@ -435,7 +680,7 @@ if uploaded_files:
                         
                         zip_buffer.seek(0)
                         st.download_button(
-                            label="📦 Download Individual Files (ZIP) - Equities Only",
+                            label="📦 Download Individual Files (ZIP)",
                             data=zip_buffer,
                             file_name="individual_equities_files.zip",
                             mime="application/zip"
@@ -454,9 +699,19 @@ else:
     - 📁 **Multiple File Upload**: Upload and process multiple NSDL/CDSL PDF files at once
     - 🔄 **Automatic Consolidation**: Automatically combines data from all uploaded files  
     - 📊 **Equities Focus**: Extracts only equity holdings, ignoring bonds and mutual funds
-    - 📈 **Comprehensive Dashboard**: View individual file results and consolidated summary
-    - 📥 **Flexible Downloads**: Download consolidated data or individual file results
+    - 📈 **Enhanced Dividend Analysis**: Fetches latest dividend data for each stock
+    - 🗂️ **Smart Caching System**: Download and reuse dividend cache files to avoid re-fetching data in future runs
+    - ⚡ **Performance Optimization**: Upload cache files from previous runs to significantly speed up processing
+    - 📋 **Comprehensive Dashboard**: View portfolio with percentage holdings and dividend details
+    - 📥 **Excel Export**: Download consolidated data with complete dividend information
     - 💼 **Account Merging**: Automatically merges data for the same account across multiple files
+    """)
+
+    st.markdown("""
+    ### 🚀 Quick Start with Cache Files:
+    1. **First Run**: Upload your PDF files and download the cache files after processing
+    2. **Future Runs**: Upload the same cache files before processing to skip data fetching
+    3. **Result**: Dramatically faster processing times for repeated analysis
     """)
 
 # Footer

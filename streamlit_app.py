@@ -318,24 +318,54 @@ if uploaded_files:
             # Display consolidated summary
             if not master_combined_df.empty:
                 st.subheader("📋 Consolidated Summary")
-                col1, col2, col3, col4 = st.columns(4)
+                col1, col2, col3 = st.columns(3)
                 
                 with col1:
                     st.metric("Total Files Processed", sum(1 for r in parsing_results if r['success']))
                 
                 with col2:
-                    st.metric("Total Accounts", len(consolidated_accounts))
-                
-                with col3:
-                    st.metric("Total Records", len(master_combined_df))
-                
-                with col4:
                     total_value = master_combined_df['Value'].sum() if 'Value' in master_combined_df.columns else 0
                     st.metric("Total Portfolio Value", f"₹{total_value:,.2f}")
                 
+                with col3:
+                    st.metric("Total Accounts", len(consolidated_accounts))
+                
                 # Display consolidated data preview
                 st.subheader("🔍 Consolidated Data Preview")
-                st.dataframe(master_combined_df.head(20), use_container_width=True)
+                
+                # Group by company name and show totals
+                if not master_combined_df.empty:
+                    # Create grouped summary
+                    grouped_df = master_combined_df.groupby('Company_Name').agg({
+                        'Current_Balance': 'sum',
+                        'Value': 'sum',
+                        'ISIN': 'first',  # Keep one ISIN per company
+                        'Account_Name': lambda x: ', '.join(x.unique()),  # Show all accounts
+                        'Depository': lambda x: ', '.join(x.unique())  # Show all depositories
+                    }).round(2)
+                    
+                    # Sort by total value (descending)
+                    grouped_df = grouped_df.sort_values('Value', ascending=False)
+                    
+                    # Reset index to make Company_Name a column
+                    grouped_df = grouped_df.reset_index()
+                    
+                    # Reorder columns for better display
+                    grouped_df = grouped_df[['Company_Name', 'ISIN', 'Current_Balance', 'Value', 'Account_Name', 'Depository']]
+                    
+                    st.markdown("**📈 Holdings Summary (Grouped by Company, Sorted by Total Value)**")
+                    st.dataframe(grouped_df, use_container_width=True)
+                    
+                    # Show top 10 holdings
+                    if len(grouped_df) > 0:
+                        st.markdown("**🏆 Top 10 Holdings by Value**")
+                        top_10 = grouped_df.head(10)[['Company_Name', 'Current_Balance', 'Value']].copy()
+                        top_10['Percentage'] = (top_10['Value'] / total_value * 100).round(2)
+                        st.dataframe(top_10, use_container_width=True)
+                    
+                    # Also show detailed view
+                    with st.expander("📋 Detailed View (All Records)", expanded=False):
+                        st.dataframe(master_combined_df.head(50), use_container_width=True)
                 
                 # Account-wise breakdown from consolidated data
                 if len(consolidated_accounts) > 1:

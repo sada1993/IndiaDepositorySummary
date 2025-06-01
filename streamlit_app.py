@@ -426,6 +426,14 @@ def create_excel_file(account_dfs, combined_df, file_source=None, grouped_df_wit
 st.title("📊 NSDL/CDSL PDF Parser - Equities Only")
 st.markdown("Upload your NSDL or CDSL PDF files to parse and extract **Equities data only** into Excel format.")
 
+# Initialize session state variables
+if 'processed_data' not in st.session_state:
+    st.session_state.processed_data = None
+if 'display_data' not in st.session_state:
+    st.session_state.display_data = None
+if 'updated_dividend_cache' not in st.session_state:
+    st.session_state.updated_dividend_cache = {}
+
 # Cache file upload section
 st.subheader("🗂️ Optional: Upload Cache Files")
 st.markdown("Upload previously downloaded cache files to speed up processing and avoid re-fetching data.")
@@ -507,190 +515,248 @@ if uploaded_files:
                 
                 if successful_account_dfs:
                     consolidated_accounts, master_combined_df = consolidate_multiple_pdfs(successful_account_dfs, successful_combined_dfs)
+                    
+                    # Store processed data in session state
+                    st.session_state.processed_data = {
+                        'consolidated_accounts': consolidated_accounts,
+                        'master_combined_df': master_combined_df,
+                        'parsing_results': parsing_results,
+                        'all_account_dfs': all_account_dfs,
+                        'all_combined_dfs': all_combined_dfs,
+                        'successful_account_dfs': successful_account_dfs,
+                        'successful_combined_dfs': successful_combined_dfs
+                    }
                 else:
                     consolidated_accounts, master_combined_df = {}, pd.DataFrame()
+                    st.session_state.processed_data = None
             
             st.success("✅ PDF parsing completed!")
             
-            # Display parsing results summary
-            st.subheader("📊 Parsing Results Summary")
-            
-            # Create summary table
-            summary_data = []
-            for result in parsing_results:
-                summary_data.append({
-                    'File Name': result['file_name'],
-                    'Status': '✅ Success' if result['success'] else '❌ Failed',
-                    'Accounts': result['accounts'],
-                    'Records': result['records'],
-                    'Total Value (₹)': f"₹{format_indian_number(result['total_value'])}" if result['success'] else 'N/A',
-                    'Error': result['error'] if not result['success'] else ''
-                })
-            
-            summary_df = pd.DataFrame(summary_data)
-            st.dataframe(summary_df, use_container_width=True)
-            
-            # Display consolidated summary
-            if not master_combined_df.empty:
-                st.subheader("📋 Consolidated Summary")
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    st.metric("Total Files Processed", sum(1 for r in parsing_results if r['success']))
-                
-                with col2:
-                    total_value = master_combined_df['Value'].sum() if 'Value' in master_combined_df.columns else 0
-                    st.metric("Total Portfolio Value", f"₹{format_indian_number(total_value)}")
-                
-                with col3:
-                    st.metric("Total Accounts", len(consolidated_accounts))
-                
-                # Display consolidated data table
-                st.subheader("📊 Portfolio Holdings")
-                
-                # Group by company name and show totals
-                if not master_combined_df.empty:
-                    # Create grouped summary
-                    grouped_df = master_combined_df.groupby('Company_Name').agg({
-                        'Current_Balance': 'sum',
-                        'Value': 'sum',
-                        'ISIN': 'first',  # Keep one ISIN per company
-                    }).round(2)
-                    
-                    # Sort by total value (descending)
-                    grouped_df = grouped_df.sort_values('Value', ascending=False)
-                    
-                    # Reset index to make Company_Name a column
-                    grouped_df = grouped_df.reset_index()
-                    
-                    # Calculate percentage holdings
-                    grouped_df['Percentage'] = (grouped_df['Value'] / total_value * 100).round(2)
-                    
-                    # Add dividend information
-                    st.info("🔄 Fetching dividend information... This may take a few moments.")
-                    st.info("ℹ️ API calls are rate-limited to avoid overwhelming servers. Please be patient.")
-                    
-                    # Progress bar for dividend fetching
-                    progress_bar = st.progress(0)
-                    dividend_data = []
-                    
-                    # Track updated cache data
-                    updated_dividend_cache = dividend_cache.copy()
-                    
-                    for idx, row in grouped_df.iterrows():
-                        # Update progress
-                        progress_bar.progress((idx + 1) / len(grouped_df))
-                        
-                        # Get dividend info with caching
-                        div_info, updated_dividend_cache = get_dividend_info_with_cache(
-                            row['Company_Name'], 
-                            row['ISIN'], 
-                            updated_dividend_cache
-                        )
-                        dividend_data.append(div_info)
-                    
-                    # Clear progress bar
-                    progress_bar.empty()
-                    
-                    # Add dividend columns to the dataframe
-                    dividend_df = pd.DataFrame(dividend_data)
-                    grouped_df = pd.concat([grouped_df, dividend_df], axis=1)
-                    
-                    # Format numbers in Indian style
-                    grouped_df['Current_Balance_Formatted'] = grouped_df['Current_Balance'].apply(lambda x: format_indian_number(x))
-                    grouped_df['Value_Formatted'] = grouped_df['Value'].apply(lambda x: f"₹{format_indian_number(x)}")
-                    
-                    # Format dividend columns
-                    def format_dividend(x):
-                        if x == 'N/A' or x == 'Error':
-                            return str(x)
-                        try:
-                            # Try to convert to float and format with rupee sign
-                            dividend_val = float(x)
-                            return f"₹{dividend_val:.2f}"
-                        except (ValueError, TypeError):
-                            # If conversion fails, return as string
-                            return str(x)
-                    
-                    grouped_df['Latest_Dividend_Formatted'] = grouped_df['Latest_Dividend'].apply(format_dividend)
-                    
-                    # Reorder columns for better display
-                    display_df = grouped_df[[
-                        'Company_Name', 'ISIN', 'Current_Balance_Formatted', 'Value_Formatted', 
-                        'Percentage', 'Latest_Dividend_Formatted', 'Dividend_Date'
-                    ]].copy()
-                    display_df.columns = [
-                        'Company Name', 'ISIN', 'Current Balance', 'Value (₹)', 
-                        'Percentage (%)', 'Latest Dividend (₹)', 'Dividend Date'
-                    ]
-                    
-                    st.dataframe(display_df, use_container_width=True)
-                
-                # Create Excel files for download
-                st.subheader("💾 Download Options")
-                
-                # Create cache files for download
-                cache_files = save_cache_data(updated_dividend_cache)
-                
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    # Consolidated Excel file
-                    consolidated_excel = create_excel_file(
-                        consolidated_accounts, 
-                        master_combined_df, 
-                        "Consolidated", 
-                        grouped_df if 'grouped_df' in locals() else None
-                    )
-                    st.download_button(
-                        label="📥 Download Consolidated Excel (with Dividend Yields)",
-                        data=consolidated_excel,
-                        file_name="consolidated_equities_with_dividend_yields.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        type="primary"
-                    )
-                
-                with col2:
-                    # Cache files download
-                    if cache_files:
-                        st.markdown("**📋 Cache Files (for faster future runs):**")
-                        
-                        if 'dividend_cache' in cache_files:
-                            st.download_button(
-                                label="📊 Download Dividend Cache",
-                                data=cache_files['dividend_cache'],
-                                file_name=f"dividend_cache_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                                mime="application/json",
-                                help="Download this file to speed up future dividend data fetching"
-                            )
-                
-                with col3:
-                    # Individual files Excel (if multiple files)
-                    if len(successful_account_dfs) > 1:
-                        # Create a zip file with individual Excel files
-                        import zipfile
-                        zip_buffer = BytesIO()
-                        
-                        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                            for i, (result, account_dfs, combined_df) in enumerate(zip(parsing_results, all_account_dfs, all_combined_dfs)):
-                                if result['success']:
-                                    file_excel = create_excel_file(account_dfs, combined_df, f"File_{i+1}")
-                                    file_name = f"{result['file_name'].replace('.pdf', '')}_parsed.xlsx"
-                                    zip_file.writestr(file_name, file_excel.getvalue())
-                        
-                        zip_buffer.seek(0)
-                        st.download_button(
-                            label="📦 Download Individual Files (ZIP)",
-                            data=zip_buffer,
-                            file_name="individual_equities_files.zip",
-                            mime="application/zip"
-                        )
-            else:
-                st.warning("⚠️ No data was extracted from any of the PDF files. Please check if the file formats are correct.")
-                
         except Exception as e:
             st.error(f"❌ Error during processing: {str(e)}")
             st.error("Please ensure all PDF files are valid NSDL/CDSL depository statements.")
+
+# Display results from session state (persists across download button clicks)
+if st.session_state.processed_data is not None:
+    # Extract data from session state
+    consolidated_accounts = st.session_state.processed_data['consolidated_accounts']
+    master_combined_df = st.session_state.processed_data['master_combined_df']
+    parsing_results = st.session_state.processed_data['parsing_results']
+    all_account_dfs = st.session_state.processed_data['all_account_dfs']
+    all_combined_dfs = st.session_state.processed_data['all_combined_dfs']
+    successful_account_dfs = st.session_state.processed_data['successful_account_dfs']
+    successful_combined_dfs = st.session_state.processed_data['successful_combined_dfs']
+    
+    # Display parsing results summary
+    st.subheader("📊 Parsing Results Summary")
+    
+    # Create summary table
+    summary_data = []
+    for result in parsing_results:
+        summary_data.append({
+            'File Name': result['file_name'],
+            'Status': '✅ Success' if result['success'] else '❌ Failed',
+            'Accounts': result['accounts'],
+            'Records': result['records'],
+            'Total Value (₹)': f"₹{format_indian_number(result['total_value'])}" if result['success'] else 'N/A',
+            'Error': result['error'] if not result['success'] else ''
+        })
+    
+    summary_df = pd.DataFrame(summary_data)
+    st.dataframe(summary_df, use_container_width=True)
+    
+    # Display consolidated summary
+    if not master_combined_df.empty:
+        st.subheader("📋 Consolidated Summary")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Total Files Processed", sum(1 for r in parsing_results if r['success']))
+        
+        with col2:
+            total_value = master_combined_df['Value'].sum() if 'Value' in master_combined_df.columns else 0
+            st.metric("Total Portfolio Value", f"₹{format_indian_number(total_value)}")
+        
+        with col3:
+            st.metric("Total Accounts", len(consolidated_accounts))
+        
+        # Display consolidated data table
+        st.subheader("📊 Portfolio Holdings")
+        
+        # Check if display data is already processed and stored
+        if st.session_state.display_data is not None:
+            grouped_df = st.session_state.display_data['grouped_df']
+            display_df = st.session_state.display_data['display_df']
+            updated_dividend_cache = st.session_state.updated_dividend_cache
+        else:
+            # Process the data for the first time
+            if not master_combined_df.empty:
+                # Create grouped summary
+                grouped_df = master_combined_df.groupby('Company_Name').agg({
+                    'Current_Balance': 'sum',
+                    'Value': 'sum',
+                    'ISIN': 'first',  # Keep one ISIN per company
+                }).round(2)
+                
+                # Sort by total value (descending)
+                grouped_df = grouped_df.sort_values('Value', ascending=False)
+                
+                # Reset index to make Company_Name a column
+                grouped_df = grouped_df.reset_index()
+                
+                # Calculate percentage holdings
+                grouped_df['Percentage'] = (grouped_df['Value'] / total_value * 100).round(2)
+                
+                # Add dividend information
+                st.info("🔄 Fetching dividend information... This may take a few moments.")
+                st.info("ℹ️ API calls are rate-limited to avoid overwhelming servers. Please be patient.")
+                
+                # Progress bar for dividend fetching
+                progress_bar = st.progress(0)
+                dividend_data = []
+                
+                # Track updated cache data
+                updated_dividend_cache = dividend_cache.copy()
+                
+                for idx, row in grouped_df.iterrows():
+                    # Update progress
+                    progress_bar.progress((idx + 1) / len(grouped_df))
+                    
+                    # Get dividend info with caching
+                    div_info, updated_dividend_cache = get_dividend_info_with_cache(
+                        row['Company_Name'], 
+                        row['ISIN'], 
+                        updated_dividend_cache
+                    )
+                    dividend_data.append(div_info)
+                
+                # Clear progress bar
+                progress_bar.empty()
+                
+                # Add dividend columns to the dataframe
+                dividend_df = pd.DataFrame(dividend_data)
+                grouped_df = pd.concat([grouped_df, dividend_df], axis=1)
+                
+                # Format numbers in Indian style
+                grouped_df['Current_Balance_Formatted'] = grouped_df['Current_Balance'].apply(lambda x: format_indian_number(x))
+                grouped_df['Value_Formatted'] = grouped_df['Value'].apply(lambda x: f"₹{format_indian_number(x)}")
+                
+                # Format dividend columns
+                def format_dividend(x):
+                    if x == 'N/A' or x == 'Error':
+                        return str(x)
+                    try:
+                        # Try to convert to float and format with rupee sign
+                        dividend_val = float(x)
+                        return f"₹{dividend_val:.2f}"
+                    except (ValueError, TypeError):
+                        # If conversion fails, return as string
+                        return str(x)
+                
+                grouped_df['Latest_Dividend_Formatted'] = grouped_df['Latest_Dividend'].apply(format_dividend)
+                
+                # Reorder columns for better display
+                display_df = grouped_df[[
+                    'Company_Name', 'ISIN', 'Current_Balance_Formatted', 'Value_Formatted', 
+                    'Percentage', 'Latest_Dividend_Formatted', 'Dividend_Date'
+                ]].copy()
+                display_df.columns = [
+                    'Company Name', 'ISIN', 'Current Balance', 'Value (₹)', 
+                    'Percentage (%)', 'Latest Dividend (₹)', 'Dividend Date'
+                ]
+                
+                # Store processed display data in session state
+                st.session_state.display_data = {
+                    'grouped_df': grouped_df,
+                    'display_df': display_df
+                }
+                st.session_state.updated_dividend_cache = updated_dividend_cache
+        
+        # Display the table
+        if st.session_state.display_data is not None:
+            st.dataframe(st.session_state.display_data['display_df'], use_container_width=True)
+        
+        # Create Excel files for download
+        st.subheader("💾 Download Options")
+        
+        # Create cache files for download
+        cache_files = save_cache_data(st.session_state.updated_dividend_cache)
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            # Consolidated Excel file
+            try:
+                consolidated_excel = create_excel_file(
+                    consolidated_accounts, 
+                    master_combined_df, 
+                    "Consolidated", 
+                    grouped_df if st.session_state.display_data is not None else None
+                )
+                st.download_button(
+                    label="📥 Download Consolidated Excel (with Dividend Yields)",
+                    data=consolidated_excel,
+                    file_name="consolidated_equities_with_dividend_yields.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    key="download_consolidated_excel"
+                )
+            except Exception as download_error:
+                st.error(f"Error creating consolidated Excel file: {str(download_error)}")
+        
+        with col2:
+            # Cache files download
+            if cache_files:
+                st.markdown("**📋 Cache Files (for faster future runs):**")
+                
+                if 'dividend_cache' in cache_files:
+                    try:
+                        st.download_button(
+                            label="📊 Download Dividend Cache",
+                            data=cache_files['dividend_cache'],
+                            file_name=f"dividend_cache_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                            mime="application/json",
+                            help="Download this file to speed up future dividend data fetching",
+                            key="download_dividend_cache"
+                        )
+                    except Exception as cache_error:
+                        st.error(f"Error creating cache file: {str(cache_error)}")
+        
+        with col3:
+            # Individual files Excel (if multiple files)
+            if len(successful_account_dfs) > 1:
+                try:
+                    # Create a zip file with individual Excel files
+                    zip_buffer = BytesIO()
+                    
+                    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                        for i, (result, account_dfs, combined_df) in enumerate(zip(parsing_results, all_account_dfs, all_combined_dfs)):
+                            if result['success']:
+                                file_excel = create_excel_file(account_dfs, combined_df, f"File_{i+1}")
+                                file_name = f"{result['file_name'].replace('.pdf', '')}_parsed.xlsx"
+                                zip_file.writestr(file_name, file_excel.getvalue())
+                    
+                    zip_buffer.seek(0)
+                    st.download_button(
+                        label="📦 Download Individual Files (ZIP)",
+                        data=zip_buffer,
+                        file_name="individual_equities_files.zip",
+                        mime="application/zip",
+                        key="download_individual_zip"
+                    )
+                except Exception as zip_error:
+                    st.error(f"Error creating ZIP file: {str(zip_error)}")
+    else:
+        st.warning("⚠️ No data was extracted from any of the PDF files. Please check if the file formats are correct.")
+
+# Add clear data button
+if st.session_state.processed_data is not None:
+    st.markdown("---")
+    if st.button("🗑️ Clear Data and Start Over"):
+        st.session_state.processed_data = None
+        st.session_state.display_data = None
+        st.session_state.updated_dividend_cache = {}
+        st.rerun()
 
 else:
     st.info("👆 Please upload one or more PDF files to get started.")
